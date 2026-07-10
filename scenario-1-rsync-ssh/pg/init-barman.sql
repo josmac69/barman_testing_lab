@@ -1,0 +1,1 @@
+CREATE USER barman WITH SUPERUSER PASSWORD 'barman';

@@ -1,0 +1,33 @@
+services:
+  pg:
+    build: ./pg
+    container_name: pg-pitr
+    environment:
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - ./.ssh_keys:/ssh-keys
+      - ./pg/init-barman.sql:/docker-entrypoint-initdb.d/init-barman.sql
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=rsync -a %p barman@barman:/var/lib/barman/pg/incoming/%f
+    networks:
+      - barman_network
+
+  barman:
+    build: ./barman
+    container_name: barman-pitr
+    volumes:
+      - ./.ssh_keys:/ssh-keys
+      - ./barman/barman.conf:/tmp/configs/barman.conf:ro
+      - ./barman/pg.conf:/tmp/configs/pg.conf:ro
+    networks:
+      - barman_network
+
+networks:
+  barman_network:
+    name: barman_network_pitr

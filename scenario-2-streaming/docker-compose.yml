@@ -1,0 +1,33 @@
+services:
+  pg:
+    image: postgres:15
+    container_name: pg-streaming
+    environment:
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - ./pg/init-streaming.sh:/docker-entrypoint-initdb.d/init-streaming.sh
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - hot_standby=on
+    networks:
+      - barman_network
+
+  barman:
+    build: ./barman
+    container_name: barman-streaming
+    volumes:
+      - ./barman/barman.conf:/tmp/configs/barman.conf:ro
+      - ./barman/pg.conf:/tmp/configs/pg.conf:ro
+    networks:
+      - barman_network
+
+networks:
+  barman_network:
+    name: barman_network_streaming
