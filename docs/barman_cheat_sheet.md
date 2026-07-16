@@ -116,3 +116,57 @@ Barman configs follow the INI format. Comments must start with `#` or `;` at the
 * **`replication slot: FAILED`**: Verify the slot name matches `slot_name` in config and the slot actually exists in the database (`SELECT slot_name, active FROM pg_replication_slots;`). Run `barman receive-wal --create-slot <server>` to fix.
 * **`archiving: FAILED`**: `archiver = off` in config, but WAL files exist in the `incoming/` directory. Check if `archive_command` is still sending WALs, or clean up/archive outstanding WAL files.
 * **`received WAL files: FAILED`**: The timeline or WAL sequence has diverged, or the streaming directory is missing active files. Verify `pg_receivewal` process status with `barman replication-status <server>`.
+
+---
+
+## 5. Security Hardening Quick Reference
+
+### Password & Credential Protection
+* **Store Passwords securely**: Avoid `password=...` in `conninfo` configuration strings. Use `.pgpass` files.
+  * **Location**: `~barman/.pgpass` (Barman host) and `~postgres/.pgpass` (Postgres host for restores).
+  * **Format**: `pghost:5432:database:username:password` (e.g. `pg_host:5432:*:barman:secure_password`).
+  * **Permissions**: Must be `0600` (`chmod 600 ~/.pgpass`).
+* **Vault Passphrase Command**: Retrieve GPG/decryption passphrases dynamically:
+  * `encryption_passphrase_command = "vault kv get -field=passphrase secret/barman/pg"`
+
+### Network Transport Encryption (TLS/SSL)
+* **Require Server Certificate Validation**: Use `sslmode=verify-ca` or `sslmode=verify-full`.
+  * `conninfo = host=pghost user=barman dbname=postgres sslmode=verify-full sslrootcert=/etc/barman/root.crt`
+* **Client Certificate Authentication**: Authenticate using SSL certificates instead of passwords:
+  * `conninfo = ... sslmode=verify-full sslrootcert=/etc/barman/root.crt sslcert=/etc/barman/barman.crt sslkey=/etc/barman/barman.key`
+  * PostgreSQL `pg_hba.conf` rule:
+    `hostssl replication barman barman_host/32 cert clientcert=verify-full`
+
+### Database Minimal Backup Privileges (PostgreSQL 15+)
+Instead of using `superuser`, grant dedicated privileges:
+```sql
+CREATE USER barman WITH PASSWORD 'secure_password';
+GRANT EXECUTE ON FUNCTION pg_backup_start(text, boolean) TO barman;
+GRANT EXECUTE ON FUNCTION pg_backup_stop(boolean) TO barman;
+GRANT EXECUTE ON FUNCTION pg_switch_wal() TO barman;
+GRANT EXECUTE ON FUNCTION pg_create_restore_point(text) TO barman;
+GRANT pg_read_all_settings TO barman;
+GRANT pg_read_all_stats TO barman;
+GRANT pg_checkpoint TO barman; -- Needed for switch-wal --force
+```
+
+### SSH Key Restrictions
+Restrict options in `~/.ssh/authorized_keys` for backup/WAL exchange keys:
+* **Option Options**:
+  ```text
+  no-port-forwarding,no-x11-forwarding,no-agent-forwarding,no-pty ssh-rsa AAAAB3...
+  ```
+* **Forced Command restriction**:
+  Restrict the SSH key to only run WAL archiving commands:
+  ```text
+  command="/usr/local/bin/barman-ssh-filter.sh",no-port-forwarding,no-x11-forwarding,no-agent-forwarding,no-pty ssh-rsa AAAAB3...
+  ```
+  *Filter Script (`/usr/local/bin/barman-ssh-filter.sh`)*:
+  ```bash
+  #!/bin/bash
+  case "$SSH_ORIGINAL_COMMAND" in
+      "barman put-wal "* ) exec $SSH_ORIGINAL_COMMAND ;;
+      * ) echo "Access Denied" >&2; exit 1 ;;
+  esac
+  ```
+

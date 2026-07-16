@@ -383,3 +383,165 @@ If the Barman backup directory (`barman_home`) is mounted via NFS:
    ```text
    nfs_server:/backups /var/lib/barman nfs4 rw,relatime,vers=4.2,hard,sync,proto=tcp 0 0
    ```
+
+---
+
+## 7. Security Hardening & Secret Management
+
+Securing backups is critical because backup data contains the entire state of your database. In production environments, even inside a trusted data center, you should implement security-in-depth to protect credentials, secure communication, and minimize access.
+
+### 7.1 Database Privilege Minimization
+Avoid using the PostgreSQL `superuser` role for the `barman` connection. Instead, configure a restricted user with the minimum necessary rights:
+
+1. **Create the Restricted User**:
+   ```sql
+   CREATE USER barman WITH PASSWORD 'secure_password';
+   ```
+2. **Grant Minimal Functions (PostgreSQL 15+)**:
+   ```sql
+   -- Allow backup start and stop coordination
+   GRANT EXECUTE ON FUNCTION pg_backup_start(text, boolean) TO barman;
+   -- For PostgreSQL 14 and earlier, use: GRANT EXECUTE ON FUNCTION pg_start_backup(text, boolean, boolean) TO barman;
+   
+   GRANT EXECUTE ON FUNCTION pg_backup_stop(boolean) TO barman;
+   -- For PostgreSQL 14 and earlier, use: GRANT EXECUTE ON FUNCTION pg_stop_backup() TO barman;
+   
+   -- Allow manual/forced WAL switching
+   GRANT EXECUTE ON FUNCTION pg_switch_wal() TO barman;
+   
+   -- Allow named recovery target marks
+   GRANT EXECUTE ON FUNCTION pg_create_restore_point(text) TO barman;
+   
+   -- Grant read-only access to cluster configurations and replication stats
+   GRANT pg_read_all_settings TO barman;
+   GRANT pg_read_all_stats TO barman;
+   
+   -- Grant permission to execute checkpoint commands (needed for switch-wal --force)
+   GRANT pg_checkpoint TO barman;
+   ```
+
+---
+
+### 7.2 Password Exposure Prevention (.pgpass)
+To prevent cleartext password leakages in Barman configuration files, logs, or process monitoring lists, remove the `password=...` attribute from `conninfo` and use PostgreSQL's `.pgpass` file.
+
+1. **Configure Barman Host `.pgpass`**:
+   Log in as the `barman` user on the Barman host and create/edit `~barman/.pgpass`:
+   ```text
+   # hostname:port:database:username:password
+   pg_host:5432:postgres:barman:secure_password
+   pg_host:5432:replication:barman:secure_password
+   ```
+2. **Restrict Permissions**:
+   ```bash
+   chmod 0600 ~barman/.pgpass
+   ```
+3. **Clean Up Configuration (`pg_server.conf`)**:
+   Now you can define connection settings without any password attributes:
+   ```ini
+   conninfo = host=pg_host user=barman dbname=postgres
+   streaming_conninfo = host=pg_host user=barman dbname=postgres
+   ```
+
+---
+
+### 7.3 Transport Encryption (TLS/SSL)
+Enable TLS to encrypt database connection passwords, backup streams, and WAL replication data traveling across the local network.
+
+1. **Enforce SSL in `conninfo`**:
+   Configure Barman to verify the PostgreSQL server's certificate. Set `sslmode` to `verify-ca` or `verify-full`:
+   ```ini
+   conninfo = host=pg_host user=barman dbname=postgres sslmode=verify-full sslrootcert=/etc/barman/ssl/root.crt
+   streaming_conninfo = host=pg_host user=barman dbname=postgres sslmode=verify-full sslrootcert=/etc/barman/ssl/root.crt
+   ```
+2. **Client Certificate Authentication (Passwordless Auth)**:
+   For stronger security, use client certificates instead of passwords. In this mode, Postgres authenticates the client using SSL certificates, eliminating database password management entirely.
+   - Configure PostgreSQL `pg_hba.conf`:
+     ```text
+     hostssl all barman barman_host/32 cert clientcert=verify-full
+     ```
+   - Configure Barman Host settings:
+     ```ini
+     conninfo = host=pg_host user=barman dbname=postgres sslmode=verify-full sslrootcert=/etc/barman/ssl/root.crt sslcert=/etc/barman/ssl/barman.crt sslkey=/etc/barman/ssl/barman.key
+     ```
+
+---
+
+### 7.4 SSH Access Restrictions
+SSH keys are required for Rsync backups and `barman-wal-archive`. To prevent unauthorized users from gaining general shell access, restrict key capabilities in the target server's `authorized_keys` file.
+
+1. **Restrict SSH Options**:
+   In `~postgres/.ssh/authorized_keys` (on the Postgres host) and `~barman/.ssh/authorized_keys` (on the Barman host), prepend the following parameters to the public keys:
+   ```text
+   no-port-forwarding,no-x11-forwarding,no-agent-forwarding,no-pty ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ...
+   ```
+2. **Implement a Forced Command Filter (SSH Command Restriction)**:
+   To ensure that the `postgres` user's SSH key on the Barman host can **only** execute WAL archiving commands (`barman put-wal`) and nothing else, use the `command="..."` option in `authorized_keys`.
+   - On the Barman host, create a restriction script `/usr/local/bin/barman-ssh-filter.sh`:
+     ```bash
+     #!/bin/bash
+     # Check the command requested by the client
+     case "$SSH_ORIGINAL_COMMAND" in
+         "barman put-wal "* )
+             # Execute the requested put-wal command
+             exec $SSH_ORIGINAL_COMMAND
+             ;;
+         * )
+             echo "Access Denied: Command execution not allowed." >&2
+             exit 1
+             ;;
+     esac
+     ```
+   - Make the script executable:
+     ```bash
+     chmod +x /usr/local/bin/barman-ssh-filter.sh
+     ```
+   - In `~barman/.ssh/authorized_keys`, prepend the command option to the incoming `postgres` public key:
+     ```text
+     command="/usr/local/bin/barman-ssh-filter.sh",no-port-forwarding,no-x11-forwarding,no-agent-forwarding,no-pty ssh-rsa AAAAB3NzaC1yc...
+     ```
+
+---
+
+### 7.5 Server File Permissions
+Ensure local Unix files are properly protected on the Barman host to restrict local root/non-root read access:
+
+- **Config Directories**:
+  ```bash
+  chown -R barman:barman /etc/barman.d/ /etc/barman.conf
+  chmod 640 /etc/barman.conf
+  chmod 640 /etc/barman.d/*.conf
+  ```
+- **Backup Storage Directory**:
+  Ensure only the `barman` user can access the backup archive files:
+  ```bash
+  chown -R barman:barman /var/lib/barman
+  chmod 0700 /var/lib/barman
+  ```
+
+---
+
+### 7.6 Storage Encryption (GPG & Vault Integration)
+To protect archived data in the event of local disk theft or cloud storage leakage, encrypt backups and WAL files before writing to disk.
+
+1. **Configure GPG Encryption**:
+   Ensure a GPG key pair has been generated for the `barman` user. In your server configuration file:
+   ```ini
+   encryption = gpg
+   encryption_key_id = 9F3B20AC  # Fingerprint of GPG Public Key
+   ```
+2. **Integrate with Vault (Secret Retrieval)**:
+   Never hardcode the GPG private key decryption passphrase on disk. Use the `encryption_passphrase_command` option to fetch the passphrase dynamically from a secure enterprise key vault:
+   - **Using HashiCorp Vault**:
+     ```ini
+     encryption_passphrase_command = "vault kv get -field=passphrase secret/barman/pg_server"
+     ```
+   - **Using AWS Secrets Manager**:
+     ```ini
+     encryption_passphrase_command = "aws secretsmanager get-secret-value --secret-id barman-pg-key --query SecretString --output text | jq -r .passphrase"
+     ```
+   - **Using a Secure Decryption Script**:
+     ```ini
+     encryption_passphrase_command = "/usr/local/bin/get-barman-passphrase.sh pg_server"
+     ```
+
