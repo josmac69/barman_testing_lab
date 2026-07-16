@@ -1,0 +1,39 @@
+services:
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://barman:barman@pg:5432/postgres?sslmode=disable"
+    networks:
+      - barman_network
+    ports:
+      - "9187:9187"
+
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: prometheus
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - barman_network
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ../monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ../monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+    networks:
+      - barman_network
+    ports:
+      - "3000:3000"
+
+  barman:
+    volumes:
+      - ../monitoring/barman_prometheus_exporter.py:/usr/local/bin/barman_prometheus_exporter.py:ro

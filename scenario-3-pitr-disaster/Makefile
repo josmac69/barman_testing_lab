@@ -18,8 +18,14 @@ up: setup
 	@until docker compose exec -T pg psql -U barman -d postgres -c "SELECT 1" >/dev/null 2>&1; do sleep 1; done
 	@echo "PostgreSQL and barman user are ready."
 
+up-monitoring: setup
+	docker compose -f docker-compose.yml -f ../monitoring/docker-compose.yml up -d --build
+	@echo "Waiting for PostgreSQL and barman user to be ready..."
+	@until docker compose exec -T pg psql -U barman -d postgres -c "SELECT 1" >/dev/null 2>&1; do sleep 1; done
+	@echo "PostgreSQL and barman user are ready."
+
 down:
-	docker compose down --remove-orphans
+	docker compose -f docker-compose.yml -f ../monitoring/docker-compose.yml down --remove-orphans
 
 check:
 	docker compose exec -u barman barman barman check pg

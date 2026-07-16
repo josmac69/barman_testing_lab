@@ -61,6 +61,12 @@ ssh-keygen -A
 echo "Starting SSH daemon..."
 /usr/sbin/sshd
 
+# Start Barman Prometheus Exporter if present
+if [ -f "/usr/local/bin/barman_prometheus_exporter.py" ]; then
+    echo "Starting Barman Prometheus Exporter..."
+    sudo -u barman python3 /usr/local/bin/barman_prometheus_exporter.py &
+fi
+
 # Run the CMD
 echo "Starting Barman Container Command..."
 exec "$@"
