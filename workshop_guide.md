@@ -25,7 +25,10 @@ graph TD
         BM1 -- barman cron --> BM_WALS1[Barman Archive Store]
         BM2[Barman Server] -- ssh (pg_basebackup/rsync) --> PG1
     end
+```
 
+```mermaid
+graph TD
     subgraph "Streaming Replication (Scenario 2, 3, 4)"
         PG2[PostgreSQL Server] -- Streaming WAL Protocol --> PRW[pg_receivewal]
         PRW --> BM_STREAM[Barman Streaming Dir]
